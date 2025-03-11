@@ -4,7 +4,7 @@
 This script reproduces the data used for the illustrations in the paper. It applies the SaMSBO algorithm on a given function.
 
 Usage:
-    python3 -m run_bayes <function_name>
+    python3 -m run_SaMSBO
 
 Arguments:
     function_name (str): The name of the function to optimize. Should be one of the following:
@@ -43,18 +43,20 @@ from bo.bo_loop import BayesianOptimization
 from numpy import load
 from utils.optim import optimize_gp
 from utils.functions import LbSync, MTBranin, MTPowell
-import sys, os
+import os
 import pickle
 from utils.utils import standardize
 from math import ceil
 
 torch.set_default_dtype(torch.float64)
 
-function_name = sys.argv[1]
-nruns = 75
-delta_max = 0.05
-rho = 0.15
-dist = 0.3
+function_name = "MTBranin" # Change function that should be optimized here
+
+nruns = 75 # number of main task evaluations
+delta_max = 0.05 # failure probability
+rho = 0.15  # confidence level
+dist = 0.3  # disturbance of supplementary task
+tau = 0.001 # discretization parameter
 
 folder = "Data" + str(int(10 * dist)) + "_2"
 if not os.path.exists(f"data/{folder}"):
@@ -95,13 +97,11 @@ betas = []
 X_init = torch.tensor(X_init)
 for i in range(X_init.size(0)):
     if function_name == "MTBranin":
-        tau = 0.001
         num_tsks = 2
         obj = MTBranin(num_tsks=num_tsks, disturbance=dist)
         d = obj.dim
         bounds = obj.bounds
     if function_name == "LbSync":
-        tau = 0.001
         num_tsks = 2
         num_lasers = 5
         KType = "PI"
@@ -111,7 +111,6 @@ for i in range(X_init.size(0)):
         d = obj.dim
         bounds = obj.bounds
     if function_name == "MTPowell":
-        tau = 0.001
         num_tsks = 2
         obj = MTPowell(dim=4, num_tsks=num_tsks, disturbance=dist)
         d = obj.dim
@@ -189,7 +188,6 @@ for i in range(X_init.size(0)):
                     norm_train_targets,
                     mu=mu,
                 )
-                # gp.likelihood.noise = noise
                 robust_gp, sqrtbeta = utils.get_robust_gp.bayesian_robust_gp(
                     sample_models, gp, norm_bounds, delta_max=delta_max, tau=tau, rho_max=rho
                 )

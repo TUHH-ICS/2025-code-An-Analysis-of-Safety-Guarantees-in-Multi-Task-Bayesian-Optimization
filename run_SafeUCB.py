@@ -5,13 +5,13 @@
 This script reproduces the data used for the illustrations in the paper. It applies the safe-UCB algorithm on a given function.
 
 Usage:
-    python3 -m run_bayes <function_name>
+    python3 -m run_SafeUCB
 
 Arguments:
     function_name (str): The name of the function to optimize. Should be one of the following:
-        - MTBranin
-        - LbSync
-        - MTPowell
+        - MTBranin_ST
+        - LbSync_ST
+        - MTPowell_ST
 
 Main Script:
     - Sets default tensor type to float64.
@@ -45,9 +45,12 @@ from utils.utils import standardize
 from math import ceil
 
 torch.set_default_dtype(torch.float64)
-function_name = "MTBranin_ST"
 
-nruns = 100
+function_name = "MTBranin_ST" # Change function that should be optimized here
+
+nruns = 100 # number of main task evaluations
+delta_max = 0.05 # failure probability
+tau = 0.001 # discretization parameter
 
 if function_name == "MTBranin_ST":
     num_tsks = 2
@@ -71,8 +74,6 @@ folder = "Bayes_ST"
 if not os.path.exists(f"data/{folder}"): os.mkdir(f"data/{folder}")
 
 norm_bounds = torch.tensor([[0.0], [1.0]]).repeat(1,d)
-delta_max = 0.15
-tau = 0.001
 tasks = list(range(num_tsks))
 
 data = load(f"data/X_init_"+function_name.split("_")[0]+".npy", allow_pickle=True).item()
