@@ -54,7 +54,7 @@ function_name = "MTBranin" # Change function that should be optimized here
 
 nruns = 75 # number of main task evaluations
 delta_max = 0.05 # failure probability
-rho = 0.15  # confidence level
+rho_max = 0.15  # confidence level
 dist = 0.3  # disturbance of supplementary task
 tau = 0.001 # discretization parameter
 
@@ -189,7 +189,7 @@ for i in range(X_init.size(0)):
                     mu=mu,
                 )
                 robust_gp, sqrtbeta = utils.get_robust_gp.bayesian_robust_gp(
-                    sample_models, gp, norm_bounds, delta_max=delta_max, tau=tau, rho_max=rho
+                    sample_models, gp, norm_bounds, delta_max=delta_max, tau=tau, rho_max=rho_max
                 )
                 noise = robust_gp.likelihood.noise.detach()
                 del sample_models

@@ -4,7 +4,7 @@
 This module provides utility functions for working with task covariance matrices in the context of 
 Bayesian optimization using Gaussian Processes.
 Functions:
-    get_barbeta(model0, sampmods, maxsqrtbeta, delta_max: float):
+    get_barbeta(model0, sampmods, maxsqrtbeta, rho_max: float):
         Computes the lambda and gamma values for the given model and sample models.
     get_gamma(candidate_dict, sampmods):
         Computes the gamma values for the given candidates.
@@ -26,12 +26,12 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 
 
-def get_barbeta(model0, sampmods, maxsqrtbeta, delta_max: float):
+def get_barbeta(model0, sampmods, maxsqrtbeta, rho_max: float):
     noise = model0.likelihood.noise.detach()
     sigmaf = model0.covar_module.outputscale.detach()
     covar = sampmods.task_covar_module._eval_covar_matrix()
     chol_covar_all = sampmods.task_covar_module.covar_factor.detach()
-    indmax = floor(covar.size(0) * (1 - delta_max))
+    indmax = floor(covar.size(0) * (1 - rho_max))
     candidate_dict = get_covar_candidates(sampmods)
     chol_covar = sampmods.task_covar_module.covar_factor.detach()[candidate_dict["inds"]]
     dets = (torch.linalg.det(sigmaf*candidate_dict['covar'])+sigmaf*noise)/(sigmaf+noise)

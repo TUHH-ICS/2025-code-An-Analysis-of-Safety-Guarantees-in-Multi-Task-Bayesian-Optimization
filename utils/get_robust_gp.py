@@ -76,9 +76,9 @@ def bayesian_robust_gp(
 ):
     if rho_max is None:
         rho_max = delta_max
-    maxsqrtbeta = beta_bayes(bounds, tau, rho_max).sqrt()
+    maxsqrtbeta = beta_bayes(bounds, tau, delta_max=delta_max).sqrt()
     gamma, lambda_, sigprime, total, covar_set, totals = get_barbeta(
-        model0, sampmods, maxsqrtbeta, delta_max
+        model0, sampmods, maxsqrtbeta, rho_max=rho_max
     )
     sigmaf = model0.covar_module.outputscale.detach()
     print(f"Correlation Matrix: {sigprime@sigprime.T}")
