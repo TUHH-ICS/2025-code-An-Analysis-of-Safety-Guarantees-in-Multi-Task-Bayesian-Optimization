@@ -130,6 +130,7 @@ class LbSync:
         Kp_min = 2e-1
         Ki_max = 3e1
         Ki_min = 0
+        self.num_tsks = num_tsks
         self.max_disturbance = 0.
 
         if Ktyp == "PI":
@@ -165,10 +166,9 @@ class MTPowell:
     def __init__(self, dim = 4, num_tsks = 2, disturbance = 0.1) -> None:
         self.bounds = torch.tensor([[-4.], [5.]]).repeat(1,dim)
         self.dim = dim
+        self.num_tsks = num_tsks
         self.disturbance = torch.sign(torch.rand(1,self.dim)-.5)*disturbance
         self.obj = [Powell(dim, negate=True,bounds=self.bounds.T) for _ in range(num_tsks)]
-        self.offset = torch.rand(num_tsks)*2*25.e3-25.e3
-        self.offset[0] = 0.0
         self.max_disturbance = disturbance
     
     def f(self, x, t): 
@@ -180,10 +180,9 @@ class MTBranin:
     def __init__(self,num_tsks = 2, disturbance = 0.1) -> None:
         self.bounds = torch.tensor([[-5.,0], [10,15]])
         self.dim = 2
+        self.num_tsks = num_tsks    
         self.disturbance = torch.sign(torch.rand(1,self.dim)-.5)*disturbance
         self.obj = [Branin(self.dim, negate=True,bounds=self.bounds.T) for _ in range(num_tsks)]
-        self.offset = torch.rand(num_tsks)*2*30-30
-        self.offset[0] = 0.0
         self.max_disturbance = disturbance
 
     def f(self, x, t): 

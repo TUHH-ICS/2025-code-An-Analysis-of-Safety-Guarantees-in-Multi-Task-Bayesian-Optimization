@@ -11,9 +11,9 @@ Functions:
             sampmods (list): List of sample models.
             model0 (GPModel): Initial GP model.
             bounds (Tensor): Tensor specifying the bounds for the input space.
-            delta_max (float, optional): Maximum allowable deviation. Default is 0.05.
+            delta_max (float, optional): Failure probability for the discretized set. Default is 0.05.
             tau (float, optional): Step size for discretizing the input space. Default is 0.01.
-            rho_max (float, optional): Maximum allowable rho value. Default is None.
+            rho_max (float, optional): Failure probability for the uncertainty set C_rho. Default is None.
             conservatism (bool, optional): Flag to indicate if conservatism should be applied. Default is False.
         
         Returns:
@@ -32,37 +32,28 @@ Functions:
         
         Returns:
             beta (Tensor): The beta parameter.
-
-    beta_freq(gp, B, delta_max=0.05, uncertainty=0.1):
-        Computes the beta parameter for frequentist robust GP.
-        
-        Parameters:
-            gp (GPModel): The GP model.
-            B (float): A parameter for the frequentist approach.
-            delta_max (float, optional): Maximum allowable deviation. Default is 0.05.
-            uncertainty (float, optional): Uncertainty parameter. Default is 0.1.
-        
-        Returns:
-            sqrt_beta (Tensor): The square root of the beta parameter.
-
-    lambda_(gp, uncertainty):
-        Computes the lambda parameter for frequentist robust GP.
-        
-        Parameters:
-            gp (GPModel): The GP model.
-            uncertainty (float): Uncertainty parameter.
-        
-        Returns:
-            lambda (Tensor): The lambda parameter.
+    
+    Further functions:
+    get_barbeta(model0, sampmods, maxsqrtbeta, rho_max: float):
+        Computes the lambda and gamma values for the given model and sample models.
+    get_gamma(sampmods):
+        Computes the scaling factor induced by the standard deviation.
+    get_nu(sampmods):
+        Computes the scaling factor induced by the mean.
+    post_mean_SE(sampmods):
+        Computes the squared error of the posterior means for the different covariance matrices.
+    plot_sampmods_det(sampmods):
+        Plots the histogram of the determinants of the covariance matrices from the sample models.
 """
 
 
 
 import torch
-from utils.task_gamma import get_barbeta
 from copy import deepcopy
-from math import sqrt, log
 from torch import Tensor
+import torch
+from math import floor
+from matplotlib import pyplot as plt
 
 
 def bayesian_robust_gp(
@@ -72,27 +63,29 @@ def bayesian_robust_gp(
     delta_max: float = 0.05,
     tau: float = 0.01,
     rho_max = None,
-    conservatism: bool = False,
 ):
     if rho_max is None:
         rho_max = delta_max
-    maxsqrtbeta = beta_bayes(bounds, tau, delta_max=delta_max).sqrt()
-    gamma, lambda_, sigprime, total, covar_set, totals = get_barbeta(
-        model0, sampmods, maxsqrtbeta, rho_max=rho_max
-    )
-    sigmaf = model0.covar_module.outputscale.detach()
-    print(f"Correlation Matrix: {sigprime@sigprime.T}")
-    print(f"Uncertainty at supplementary task: {total*sigmaf}")
-    model0.task_covar_module._set_covar_factor(sigprime)
     robustmodel = deepcopy(model0)
-    print(f"lambda:{lambda_}")
+
+    sqrtbeta = beta_bayes(bounds, tau, delta_max).sqrt()
+    gamma, nu, sigprime = get_barbeta(
+        model0, sampmods, sqrtbeta, rho_max
+    )
+    print(f"nu:{nu}")
     print(f"gamma: {gamma}")
-    sqrtbeta = gamma * maxsqrtbeta + lambda_
-    print(f"sqrtbeta: {sqrtbeta}")
-    if conservatism:
-        return robustmodel, sqrtbeta, covar_set, totals
-    else:
+    sqrtbetabar = gamma * sqrtbeta + nu
+    print(f"sqrtbetabar: {sqrtbetabar}")
+    sigmaprime = sigprime@sigprime.T
+    print(f"Correlation Matrix: {sigmaprime}")
+    if sqrtbeta <= sqrtbetabar*sigmaprime.det():
+        robustmodel.task_covar_module._set_covar_factor(torch.eye(sigmaprime.size(0)))
+        print("Using identity covariance matrix")
         return robustmodel, sqrtbeta
+    else:
+        robustmodel.task_covar_module._set_covar_factor(sigprime)
+        print("Using correlation matrix")
+        return robustmodel, sqrtbetabar
 
 
 def beta_bayes(
@@ -100,29 +93,102 @@ def beta_bayes(
     tau: float = 0.01,
     delta_max: float = 0.05,
 ):
-    M = torch.hstack([torch.ceil((bu - bl) / tau)-1 for bl, bu in bounds.T])
+    M = torch.hstack([torch.ceil((bu - bl) / (2*tau)) + 1 for bl, bu in bounds.T])
     m = M.prod()
     beta = 2 * torch.log(m / delta_max)
     return beta
 
 
-def beta_freq(gp, B, delta_max: float = 0.05, uncertainty: float = 0.1):
-    n = gp.train_targets.size(0)
-    fact1 = sqrt(n + 2 * n * sqrt(log(1 / delta_max)) + 2 * log(1 / delta_max))
-    print(f"fact1: {fact1}")
-    sqrt_beta = lambda_(gp, uncertainty) * B + fact1
-    return sqrt_beta
+def get_barbeta(model0, sampmods, maxsqrtbeta, rho_max: float):
+    noise = model0.likelihood.noise.detach()
+    sigmaf = model0.covar_module.outputscale.detach()
+    covar = sampmods.task_covar_module._eval_covar_matrix()
+    indmax = floor(covar.size(0) * (1 - rho_max))
+    chol_covar = sampmods.task_covar_module.covar_factor.detach()
+    dets = (torch.linalg.det(sigmaf*covar)+sigmaf*noise)/(sigmaf+noise)
+    plot_sampmods_det(sampmods)
+    with torch.no_grad():
+        gamma = get_gamma(sampmods)
+        # nu2 = get_nu_comp(sampmods)
+        nu = get_nu(sampmods)
+    total = maxsqrtbeta*gamma + nu
+    total *= dets.sqrt().view(-1,1)
+    total,inds = total.sort(dim=-1)
+    Id = total[:,indmax].argmin()
+    sigprime = chol_covar[Id]
+    gamma = gamma[Id,inds[Id,indmax]].detach()
+    nu = nu[Id,inds[Id,indmax]].detach()
+    return gamma, nu, sigprime
 
 
-def lambda_(gp, uncertainty) -> Tensor:
-    covar = gp.task_covar_module._eval_covar_matrix()
-    n = covar.size(-1)
-    matofdiag = torch.ones(n, n) - torch.eye(n)
-    covar_u = torch.minimum(
-        covar + uncertainty * matofdiag, torch.ones_like(covar) - 1e-1 * matofdiag
-    )
-    covar_l = torch.maximum(covar - uncertainty * matofdiag, torch.zeros_like(covar))
-    eig_u = torch.linalg.eigvals(torch.linalg.solve(covar_u, covar)).real.max()
-    eig_l = torch.linalg.eigvals(torch.linalg.solve(covar_l, covar)).real.max()
-    return torch.maximum(eig_u, eig_l).sqrt()
+def get_gamma(sampmods):
+    covar = sampmods.task_covar_module._eval_covar_matrix()
+    sigmaf = sampmods.covar_module.outputscale.detach()
+    noise = sampmods.likelihood.noise.detach()
+    gamma = torch.linalg.eigvals(torch.linalg.solve((covar+noise/sigmaf*torch.eye(covar.size(-1)).unsqueeze(0)).unsqueeze(1),(covar+noise/sigmaf*torch.eye(covar.size(-1)).unsqueeze(0)).unsqueeze(0))).real.max(dim=-1)[0]
+    return gamma.sqrt()
 
+
+def get_covar_factors(sampmods):
+    covar = sampmods.task_covar_module._eval_covar_matrix().detach()
+    return torch.linalg.cholesky(covar, upper=False).squeeze()
+
+
+def get_nu_comp(sampmods):
+    sampmods.train()
+    covar_factors = get_covar_factors(sampmods)
+    L_norm = torch.linalg.norm(torch.linalg.solve(covar_factors.unsqueeze(1), covar_factors.unsqueeze(0)),dim=(-1,-2),ord=2)**2
+    train_inputs = sampmods.train_inputs[0]
+    train_targets = sampmods.train_targets
+    noise = sampmods.likelihood.noise.detach()
+    K = sampmods(train_inputs).covariance_matrix
+    Kd = K + noise * torch.eye(K.size(-1)).unsqueeze(0)
+    alpha = torch.linalg.solve(Kd, train_targets.unsqueeze(-1))
+    term1 = alpha.transpose(-1,-2).matmul(K).matmul(alpha).squeeze()
+    term2 = alpha.unsqueeze(1).transpose(-1,-2).matmul(K).matmul(alpha).squeeze()
+    norm_diff = term1.unsqueeze(1) - 2*term2 + L_norm.mul(term1.unsqueeze(0))
+    mean_se = post_mean_SE(sampmods)
+    return norm_diff.add(mean_se).maximum(torch.tensor(1e-12)).sqrt()
+
+
+def get_nu(sampmods):
+    sampmods.train()
+    covar_factors = sampmods.task_covar_module._eval_covar_matrix().detach()
+    L = covar_factors.unsqueeze(0).matmul(torch.linalg.solve(covar_factors.unsqueeze(1), covar_factors.unsqueeze(0)))
+    train_inputs = sampmods.train_inputs[0]
+    train_targets = sampmods.train_targets
+    train_tasks = train_inputs[0,:,-1].to(dtype=torch.int32)
+    noise = sampmods.likelihood.noise.detach()
+    K = sampmods(train_inputs).covariance_matrix
+    Kd = K + noise * torch.eye(K.size(-1)).unsqueeze(0)
+    alpha = torch.linalg.solve(Kd, train_targets.unsqueeze(-1))
+    k1 = sampmods.covar_module(train_inputs[:,:,:-1]).evaluate()
+    task_covs = L[...,train_tasks,train_tasks.unsqueeze(-1)]
+    K2 = k1.mul(task_covs)
+    term1 = alpha.transpose(-1,-2).matmul(K).matmul(alpha)
+    term2 = alpha.unsqueeze(1).transpose(-1,-2).matmul(K).matmul(alpha)
+    term3 = alpha.transpose(-1,-2).matmul(K2).matmul(alpha)
+    norm_diff = (term1.unsqueeze(1) -2*term2 + term3).squeeze()
+    mean_se = post_mean_SE(sampmods)
+    return norm_diff.add(mean_se).maximum(torch.tensor(1e-12)).sqrt()
+
+
+def post_mean_SE(sampmods):
+    noise =sampmods.likelihood.noise.detach()
+    (train_inputs,) = sampmods.train_inputs
+    sampmods.eval()
+    mu1 = sampmods(train_inputs).mean
+    mu0 = mu1
+    normdiff = torch.norm(mu0.unsqueeze(1) - mu1.unsqueeze(0), 2,dim=-1) ** 2 / noise
+    return normdiff  
+
+
+def plot_sampmods_det(sampmods):
+    covar = sampmods.task_covar_module._eval_covar_matrix()
+    dets = torch.linalg.det(covar)
+    _, ax = plt.subplots()
+    ax.hist(dets.detach().numpy())
+    ax.set_title("Determinants of Covariance Matrices")
+    ax.set_xlabel("Determinant")
+    ax.set_ylabel("Frequency")
+    plt.show()

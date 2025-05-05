@@ -70,13 +70,14 @@ def multistart_optimization(gp, num_restarts=1, mode=2, max_iter=20):
 
 
 def optimize_gp(
-    gp, mode=2, max_iter=20
+    gp, mode=2, max_iter=20, train_covar=False
 ):
     (training_inputs,) = gp.train_inputs
     training_targets = gp.train_targets
 
-    gp.mean_module.base_means[0].constant.requires_grad = False
-    gp.task_covar_module.covar_factor.requires_grad = False
+    # gp.mean_module.base_means[0].constant.requires_grad = False
+    if not train_covar and hasattr(gp, "task_covar_module"):
+        gp.task_covar_module.covar_factor.requires_grad = False
 
     mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
     gp.train()
@@ -118,7 +119,7 @@ def optimize_gp(
         except:
             Warning("Optimization failed")
             return None, 0, False
-    print(
-        f"\nFinal loss: {losses[-1]}, Outputscale: {gp.covar_module.outputscale.item()}, Correlation: {gp.task_covar_module._eval_covar_matrix()}, Lengthscales: {gp.covar_module.base_kernel.lengthscale} \n"
-    )
+    # print(
+    #     f"\nFinal loss: {losses[-1]}, Outputscale: {gp.covar_module.outputscale.item()}, Lengthscales: {gp.covar_module.base_kernel.lengthscale}, Means: {[i.constant.item() for i in gp.mean_module.base_means]} \n"
+    # )
     return gp, losses[-1], True

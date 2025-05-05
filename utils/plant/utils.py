@@ -32,9 +32,42 @@ from . models import get_disturbance_filter, get_laser_model, get_reference_filt
 from botorch.utils.transforms import unnormalize
 from slycot.exceptions import SlycotError
 import torch
+from joblib import Parallel, delayed
 
 
-def get_nh2(param, G, bounds, K_typ="PI"):
+def safe_eval(i, param_i, G, K_typ):
+    flag = False
+    while not flag:
+        try:
+            val = h2_norm(get_closed_loop(param_i, G, K_typ))
+            return i, torch.tensor(val)
+        except SlycotError:
+            print(f"SLICOT ERROR at index {i}, retrying...")
+            param_i += 1e-8 * torch.ones_like(param_i)
+
+def get_nh2(param, G, bounds, K_typ, n_jobs=-1):
+    # Ensure n_jobs is an integer
+    param = unnormalize(param, bounds).round(decimals=7)
+    if not isinstance(n_jobs, int):
+        try:
+            n_jobs = int(n_jobs)
+        except Exception:
+            n_jobs = -1
+
+    num_evals = param.shape[0]
+    param_np = param.detach().numpy()
+
+    results = Parallel(n_jobs=n_jobs, backend="loky")(
+        delayed(safe_eval)(i, param_np[i, ...], G, K_typ)
+        for i in range(num_evals)
+    )
+
+    # Sort results by index
+    results.sort()
+    vals = torch.stack([val for _, val in results])
+    return -vals.view(-1, 1)  
+
+def get_nh22(param, G, bounds, K_typ="PI"):
     param = unnormalize(param, bounds).round(decimals=7)
     num_evals = param.size(0)
     vals = torch.zeros(num_evals, 1)
@@ -53,7 +86,7 @@ def get_nh2(param, G, bounds, K_typ="PI"):
     return -vals
 
 
-max_h2 = 50.
+MAX_H2 = 50.
 
 
 def h2_norm(ss: StateSpace):
@@ -61,9 +94,9 @@ def h2_norm(ss: StateSpace):
     try:
         Wo = gram(ss, "o")
     except ValueError as e:
-        print(f"Got error {e}.\n Returned max H2 value:{max_h2}")
-        return max_h2
-    H2 = minimum(sqrt(trace(B.T @ Wo @ B)), max_h2)
+        print(f"Got error {e}.\n Returned max H2 value:{MAX_H2}")
+        return MAX_H2
+    H2 = minimum(sqrt(trace(B.T @ Wo @ B)), MAX_H2)
     return H2
 
 
@@ -156,6 +189,8 @@ def get_closed_loop(params, G, C="PI"):
         K = pi_controller(params)
     elif C == "P":
         K = p_controller(params)
+    else:
+        raise ValueError(f"Unknown controller type '{C}'. Expected 'PI' or 'P'.")
     num_c = len(K)
     inputs = [f"w({i})" for i in range(num_c)] + ["wr"]
     return interconnect(K + [G], inputs=inputs, outputs=["z"])

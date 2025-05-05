@@ -1,137 +1,44 @@
-#!/usr/bin/env python3
-"""
-BayesianOptimization class for performing safe multi-task Bayesian optimization.
-
-Attributes:
-    obj: The objective function to be optimized.
-    tasks: List of tasks for multi-task optimization.
-    bounds: Tensor specifying the bounds for the optimization variables.
-    threshold: The safety threshold for the optimization.
-    targets_mean_std: Tuple containing the mean and standard deviation of the targets.
-    num_acq_samps: List specifying the number of acquisition samples for each task.
-    boundary_T: Boundary threshold for the optimization.
-    run: Counter for the number of optimization steps.
-    best_y: List of best observed values.
-    best_x: List of best observed inputs.
-    dim: Dimensionality of the optimization problem.
-    gp: Gaussian process model used for optimization.
-
-Methods:
-    __init__(self, obj, tasks, bounds, threshold, targets_mean_std, num_acq_samps=[1, 1], boundary_T=-15.0):
-        Initializes the BayesianOptimization class with the given parameters.
-
-    step(self):
-        Performs one step of the Bayesian optimization loop.
-
-    inequality_consts(self, input: Tensor):
-        Computes the inequality constraints for the given input.
-
-    update_gp(self, gp, sqrtbeta):
-        Updates the Gaussian process model and related attributes.
-
-    _line_search(self, initial_condition, maxiter=20, step_size=2.0):
-        Performs a line search to find a feasible initial condition.
-
-    _get_max_observed(self):
-        Returns the maximum observed values for each task.
-
-    _get_min_observed(self):
-        Returns the minimum observed values for each task.
-
-    _get_best_input(self):
-        Returns the best input values for each task.
-
-    _get_initial_cond(self):
-        Returns the initial conditions for the optimization.
-
-    get_next_point(self, task, posterior_transform):
-        Returns the next point to evaluate for the given task.
-"""
-
-
 import torch
 from torch import Tensor
 from botorch.optim.optimize import optimize_acqf
-from botorch.acquisition import qUpperConfidenceBound
+from botorch.acquisition import qUpperConfidenceBound, qLogExpectedImprovement
 from utils.utils import concat_data, unstandardize, standardize
 from botorch.acquisition.objective import ScalarizedPosteriorTransform
 
 N_TOL = -1e-6
 
 
-class BayesianOptimization:
-    def __init__(
-        self,
-        obj,
-        tasks,
-        bounds,
-        threshold,
-        targets_mean_std,
-        num_acq_samps: list = [1, 1],
-        boundary_T=-15.0,
-    ):
+class BaseBayesianOptimization:
+    def __init__(self, obj, bounds, threshold = None, unstd_threshold= None, num_acq_samps = [1], constraints=True, main_task=0):   
         self.obj = obj
         self.bounds = bounds
         self.threshold = threshold
-        self.boundary_T = boundary_T
-        self.mu, self.std = targets_mean_std
+        self.unstd_threshold = unstd_threshold
         self.num_acq_samps = num_acq_samps
-        self.tasks = tasks
-        if len(self.num_acq_samps) != len(self.tasks):
-            raise ValueError("Number of tasks and number of samples must match")
         self.run = 0
         self.best_y = []
         self.best_x = []
         self.dim = bounds.size(-1)
         self.gp = None
+        self.constraints = constraints
+        self.main_task = main_task  
+        if self.constraints and (threshold is None or unstd_threshold is None):
+            raise ValueError("Threshold and unstandardized threshold must be provided for constrained optimization.")
 
     def step(self):
-        self.run += 1
-        print("Run : ", self.run)
-        print(f"Best value found: {self.observed_max[0]: .3f}")
-        print(f"Worst value: {self._get_min_observed()[0]}")
-        W = torch.eye(len(self.tasks))
-        for i in self.tasks:
-            posterior_transform = ScalarizedPosteriorTransform(W[:, i].squeeze())
-            new_point = self.get_next_point(i, posterior_transform)
-            if i == 0:
-                print(f"New Point: {new_point}")
-                new_point_task0 = new_point
-            if i != 0:
-                new_point = torch.vstack((new_point, new_point_task0))
-            new_result = self.obj.f(new_point, i)
-            self.train_inputs, self.train_tasks, self.unstd_train_targets = concat_data(
-                (new_point, i * torch.ones(new_point.shape[0], 1), new_result),
-                (self.train_inputs, self.train_tasks, self.unstd_train_targets),
-            )
-        threshold = unstandardize(self.threshold, self.mu, self.std)
-        self.train_targets, self.mu, self.std = standardize(
-            self.unstd_train_targets, train_task=self.train_tasks
-        )
-        self.threshold, _, _ = standardize(threshold, self.mu, self.std)
-        self.observed_max = self._get_max_observed()
-        self.best_y.append(self.observed_max[0])
-        self.best_x.append(self._get_best_input()[0])
-        return self.train_inputs, self.train_tasks, self.train_targets
+        raise NotImplementedError("Subclasses must implement the `step` method.")
+    
 
-    def inequality_consts(self, input: Tensor):
-        self.gp.eval()
-        inputx = input.view(int(input.numel() / self.dim), self.dim)
-        output = self.gp(torch.hstack((inputx, torch.zeros(inputx.size(0), 1))))
-        val = (
-            output.mean
-            - output.covariance_matrix.diag().sqrt() * self.sqrtbeta
-            - self.threshold
-        )
-        return val.view(inputx.shape[0], 1)
-
-    def update_gp(self, gp, sqrtbeta):
+    def update_gp(self, gp, sqrtbeta = 2.):
         with torch.no_grad():
-            self.train_inputs = gp.train_inputs[0][..., :-1]
-            self.train_tasks = gp.train_inputs[0][..., -1:].to(dtype=torch.int32)
+            if self.dim < gp.train_inputs[0].size(-1):
+                self.train_inputs = gp.train_inputs[0][..., :-1]
+                self.train_tasks = gp.train_inputs[0][..., -1:].to(dtype=torch.int32)
+            else:
+                self.train_inputs = gp.train_inputs[0]
             self.train_targets = gp.train_targets.unsqueeze(-1)
             self.unstd_train_targets = unstandardize(
-                self.train_targets, self.mu, self.std, self.train_tasks
+                self.train_targets, self.unstd_threshold
             )
             self.sqrtbeta = sqrtbeta.detach()
         if self.gp is None:
@@ -139,9 +46,8 @@ class BayesianOptimization:
             self.best_y.append(self.observed_max[0])
             self.best_x.append(self._get_best_input()[0])
         self.gp = gp
-        pass
 
-    def _line_search(self, initial_condition, maxiter=20, step_size=2.0):
+    def _line_search(self, initial_condition, step_size=0.1):
         k = 1000
         direction = torch.randn(initial_condition.size())
         direction /= (
@@ -168,6 +74,69 @@ class BayesianOptimization:
             )
         return initial_condition
 
+    def inequality_consts(self, input: Tensor):
+        raise NotImplementedError("Subclasses must implement `inequality_consts`.")
+    
+    def _get_initial_cond(self):
+        raise NotImplementedError("Subclasses must implement `_get_initial_cond`.")
+
+    def _get_max_observed(self):
+        raise NotImplementedError("Subclasses must implement `_get_max_observed`.")
+
+    def _get_best_input(self):
+        raise NotImplementedError("Subclasses must implement `_get_best_input`.")
+
+    def get_next_point(self, task, posterior_transform):
+        raise NotImplementedError("Subclasses must implement `get_next_point`.")
+
+
+class MultiTaskBayesianOptimization(BaseBayesianOptimization):
+    def __init__(self, obj, tasks, bounds, threshold = None, unstd_threshold= None, num_acq_samps = [1], constraints=True):
+        super().__init__(obj, bounds, threshold, unstd_threshold, num_acq_samps, constraints)
+        self.tasks = tasks
+        if len(self.num_acq_samps) != len(self.tasks):
+            raise ValueError("Number of tasks and number of samples must match")
+
+    def step(self):
+        self.run += 1
+        print("Run : ", self.run)
+        print(f"Best value: {self.observed_max[0]: .3f}")
+        print(f"Worst value: {self._get_min_observed()[0]: .3f}")
+        W = torch.eye(len(self.tasks))
+        for i in self.tasks:
+            posterior_transform = ScalarizedPosteriorTransform(W[:, i].squeeze())
+            new_point = self.get_next_point(i, posterior_transform)
+            if i == self.main_task:
+                print(f"New Point: {new_point}")
+                new_point_task0 = new_point
+                new_result = self.obj.f(new_point, self.main_task)
+                print(f"New Observation: {new_result}")
+            if i != self.main_task:
+                new_point = torch.vstack((new_point, new_point_task0))
+                new_result = self.obj.f(new_point, i)
+            self.train_inputs, self.train_tasks, self.unstd_train_targets = concat_data(
+                (new_point, i * torch.ones(new_point.shape[0], 1), new_result),
+                (self.train_inputs, self.train_tasks, self.unstd_train_targets),
+            )
+        self.train_targets = standardize(
+            self.unstd_train_targets, T=self.unstd_threshold
+        )
+        self.observed_max = self._get_max_observed()
+        self.best_y.append(self.observed_max[0])
+        self.best_x.append(self._get_best_input()[0])
+        return self.train_inputs, self.train_tasks, self.train_targets
+    
+    def inequality_consts(self, input: Tensor):
+        self.gp.eval()
+        inputx = input.view(int(input.numel() / self.dim), self.dim)
+        output = self.gp(torch.hstack((inputx, self.main_task*torch.ones(inputx.size(0), 1))))
+        val = (
+            output.mean
+            - output.covariance_matrix.diag().sqrt() * self.sqrtbeta
+            - self.threshold
+        )
+        return val.view(inputx.shape[0], 1)
+
     def _get_max_observed(self):
         return [
             torch.max(self.unstd_train_targets[self.train_tasks == i]).item()
@@ -187,18 +156,26 @@ class BayesianOptimization:
             ]
             for i in self.tasks
         ]
-
+    
     def _get_initial_cond(self):
-        _, ind = self.train_targets.sort(dim=0, descending=True)
-        sorted_train_inp = self.train_inputs[ind.squeeze(), ...]
-        eqfull = self.inequality_consts(sorted_train_inp).squeeze()
-        pot_cond = sorted_train_inp.view(self.train_inputs.size())[eqfull >= 0, ...][
-            :5, ...
-        ]
+        train_x0 = self.train_inputs[self.train_tasks.squeeze() == 0]
+        train_x = self.train_inputs[self.train_tasks.squeeze() != 0]
+        probabilities_task0 = torch.softmax(self.train_targets[self.train_tasks.squeeze() == 0].view(-1), dim=0)
+        probabilities_task_other = torch.softmax(self.train_targets[self.train_tasks.squeeze() != 0].view(-1), dim=0)
+        sampled_indices0 = torch.multinomial(probabilities_task0, num_samples=min(5, probabilities_task0.numel()), replacement=False)
+        sampled_indices = torch.multinomial(probabilities_task_other, num_samples=min(10, probabilities_task_other.numel()), replacement=False)
+        sampled_train_inp = torch.vstack((train_x0[sampled_indices0], train_x[sampled_indices]))
+        eqfull = self.inequality_consts(sampled_train_inp).squeeze()
+        pot_cond = sampled_train_inp[eqfull >= 0, ...]
+        unique_cond = []
+        for i, inp in enumerate(pot_cond):
+            if all(torch.linalg.norm(inp - uinp) >= 0.05 for uinp in unique_cond):
+                unique_cond.append(inp)
+        pot_cond = torch.stack(unique_cond) if unique_cond else pot_cond[:1]
         return pot_cond.view(pot_cond.size(0), 1, self.dim)
 
     def get_next_point(self, task, posterior_transform):
-        if task == 0:
+        if task == self.main_task and self.constraints:
             init_cond = self._get_initial_cond()
             if init_cond.numel() == 0:
                 print(
@@ -216,35 +193,126 @@ class BayesianOptimization:
                 return x_new
             else:
                 init_cond = self._line_search(init_cond)
+            
             acq = qUpperConfidenceBound(
                 self.gp,
                 self.sqrtbeta,
                 posterior_transform=posterior_transform,
             )
-        # if different acquisitions should be used
-        else:
-            acq = qUpperConfidenceBound(
-                self.gp,
-                beta=self.sqrtbeta,
-                posterior_transform=posterior_transform,
-            )
-        candidate, tt = optimize_acqf(
+            candidate, tt = optimize_acqf(
             acq_function=acq,
             bounds=(
                 self.bounds
-                if task == 0
-                else self.bounds
-                + torch.tensor(
-                    [[self.obj.max_disturbance], [-self.obj.max_disturbance]] # max_disturbance is zero for LbSync (only shifts)
-                )
             ),
             q=self.num_acq_samps[task],
-            num_restarts=init_cond.size(0) if task == 0 else 1,
-            raw_samples=512 if task != 0 else None,
+            num_restarts=init_cond.size(0) if task == self.main_task else 8,
+            raw_samples=512 if task != self.main_task else None,
             nonlinear_inequality_constraints=(
-                [self.inequality_consts] if task == 0 else None
+                [self.inequality_consts] if task == self.main_task else None
             ),
-            batch_initial_conditions=init_cond if task == 0 else None,
+            batch_initial_conditions=init_cond if task == self.main_task else None,
             options={"maxiter": 200},
         )
+        else:
+            acq = qLogExpectedImprovement(
+                self.gp,
+                best_f=self.observed_max[task],
+                posterior_transform=posterior_transform,
+            )
+            # acq = qUpperConfidenceBound(
+            #     self.gp,
+            #     beta=self.sqrtbeta,
+            #     posterior_transform=posterior_transform,
+            # )
+            candidate, tt = optimize_acqf(
+                acq_function=acq,
+                bounds=(
+                    self.bounds
+                ),
+                q=self.num_acq_samps[task],
+                num_restarts= 16,
+                raw_samples=512,
+                options={"maxiter": 200},
+            )
+        return candidate
+
+
+class SingleTaskBayesianOptimization(BaseBayesianOptimization):
+    def __init__(self, obj, bounds, threshold, unstd_threshold, num_acq_samps, constraints=True):
+        super().__init__(obj, bounds, threshold, unstd_threshold, num_acq_samps, constraints)
+
+    def step(self):
+        self.run += 1
+        print(f"Run: {self.run}")
+        print(f"Best value: {self.observed_max[0]: .3f}")
+        new_point = self.get_next_point()
+        new_result = self.obj.f(new_point,0)
+        self.train_inputs, self.unstd_train_targets = concat_data(
+            (new_point, new_result),
+            (self.train_inputs, self.unstd_train_targets),
+        )
+        self.train_targets = standardize(
+            self.unstd_train_targets, T=self.unstd_threshold
+        )
+        self.observed_max = self._get_max_observed()
+        self.best_y.append(self.observed_max[0])
+        self.best_x.append(self._get_best_input()[0])
+        return self.train_inputs, None, self.train_targets
+    
+    def inequality_consts(self, input: Tensor):
+        self.gp.eval()
+        inputx = input.view(int(input.numel() / self.dim), self.dim)
+        output = self.gp(inputx)
+        val = (
+            output.mean
+            - output.variance.sqrt() * self.sqrtbeta
+            - self.threshold
+        )
+        return val.view(inputx.shape[0], 1)
+
+    def _get_max_observed(self):
+        return [torch.max(self.unstd_train_targets).item()]
+
+    def _get_best_input(self):
+        return [
+            self.train_inputs[torch.argmax(self.train_targets)]
+        ]
+    
+    def _get_initial_cond(self):
+        train_x = self.train_inputs
+        probabilities_task = torch.softmax(self.train_targets.view(-1), dim=0)
+        sampled_indices = torch.multinomial(probabilities_task, num_samples=min(10, probabilities_task.numel()), replacement=False)
+        pot_cond = train_x[sampled_indices]
+        return pot_cond.view(pot_cond.size(0), 1, self.dim)
+
+
+    def get_next_point(self):
+        acq = qUpperConfidenceBound(
+                self.gp,
+                beta=self.sqrtbeta
+            )
+        if self.constraints:
+            init_cond = self._get_initial_cond()
+            print(init_cond)
+            init_cond = self._line_search(init_cond)
+            print(init_cond)
+            candidate, tt = optimize_acqf(
+                acq_function=acq,
+                bounds=self.bounds,
+                q=1,
+                num_restarts=init_cond.size(0), 
+                nonlinear_inequality_constraints=[self.inequality_consts],
+                batch_initial_conditions=init_cond,
+                options={"maxiter": 200},
+                timeout_sec=10,
+            )
+        else:
+            candidate, tt = optimize_acqf(
+                acq_function=acq,
+                bounds=self.bounds,
+                q=1,
+                num_restarts=8,
+                raw_samples=512,
+                options={"maxiter": 200},
+            )
         return candidate
