@@ -7,7 +7,7 @@ This repository contains supplementary material and the code to reproduce the ta
 > J. O. Lübsen, A. Eichler, "An Anlysis of Safety Guarantees in Multi-Task Bayesian Optimization"
 
 
-To run the proposed SaMSBO algorithm, the user can use the 'run_SaMSBO.py' file. To run the safe UCB algorithm for comparison, the user can use the 'run_SafeUCB.py' file.
+To run the proposed SaMSBO algorithm, the user can execute the 'run_samsbo.py' file. The remaining algorithms used for comparison in the paper can be executed via the 'run_comparisons.py' file.
 Additionally, the script 'example.py' visualizes the optimization of a one-dimensional example.
 
 The data used for plots to generate the figures in the manuscript are in the data folder. The user can use the 'generate_plots.ipynb' notebook to recreate the figures in the 'plot_scripts' folder.
